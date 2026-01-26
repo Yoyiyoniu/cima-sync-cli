@@ -1,0 +1,69 @@
+mod auth;
+mod utils;
+
+use clap::Parser;
+use colored::*;
+use rpassword;
+
+use auth::login;
+use utils::print_banner;
+
+#[derive(Parser)]
+#[command(name = "Cima Sync - CLI")]
+#[command(about = "Auth on captive portal on UABC wifi using CLI")]
+#[command(disable_help_flag = true)]
+struct Cli {
+    #[arg(long, short = 'a')]
+    auth: Option<String>,
+    #[arg(long, short = 'h')]
+    help: bool,
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.auth {
+        Some(user) => {
+            print_banner();
+
+            let password =
+                rpassword::prompt_password(format!("{}", "│ Contraseña: ".bright_yellow()))
+                    .unwrap();
+
+            println!("{}", "├─ Autenticando...".bright_black());
+
+            let lg = login(&user, &password);
+            match lg {
+                Ok(_) => {
+                    println!(
+                        "\n{} {}",
+                        "✓".bright_green().bold(),
+                        "Se ha iniciado sesion!".bright_green()
+                    );
+                }
+                Err(error) => {
+                    println!(
+                        "\n{} {} {}",
+                        "✗".bright_red().bold(),
+                        "Error:".bright_red().bold(),
+                        error.to_string().red()
+                    );
+                }
+            }
+        }
+        None => {
+            print_banner();
+            println!("{}", "Available Commands:".bright_white().bold());
+            println!(
+                "{} {}",
+                "  --auth".bright_cyan(),
+                "<username>".bright_black()
+            );
+            println!(
+                "\n{} Use {} for more information\n",
+                "Tip:".bright_yellow(),
+                "--help".bright_cyan()
+            );
+        }
+    }
+}
