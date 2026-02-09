@@ -25,7 +25,7 @@ fn main() {
     match cli.auth {
         Some(user) => {
             print_banner();
-
+            
             let password =
                 rpassword::prompt_password(format!("{}", "│ Contraseña: ".bright_yellow()))
                     .unwrap();
