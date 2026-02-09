@@ -41,9 +41,24 @@ fn main() {
             match lg {
                 Ok(_) => {
                     println!(
-                        "\n{} {}",
-                        "✓".bright_green().bold(),
-                        "Se ha iniciado sesion!".bright_green()
+                        "{} {}",
+                        "├─ ✓".bright_green().bold(),
+                        "Sesión iniciada correctamente".bright_green()
+                    );
+                    println!(
+                        "{} {}",
+                        "├─ ✓".bright_green().bold(),
+                        "Ya puedes utilizar WiFi".bright_white()
+                    );
+                    println!(
+                        "{} {}",
+                        "├─ ✓".bright_green().bold(),
+                        "Más información:".bright_black()
+                    );
+                    println!(
+                        "{} {}",
+                        "└─ 🌐".bright_green().bold(),
+                        "https://cima-sync.app".bright_cyan().underline()
                     );
                 }
                 Err(error) => {

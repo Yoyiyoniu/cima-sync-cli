@@ -61,7 +61,7 @@ fn send_login(
     if response.status().is_success() {
         let body = response.text()?;
         return Ok(body.contains("<title>Login Successful</title>"));
-    }
+    } 
 
     Ok(false)
 }
