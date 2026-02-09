@@ -20,6 +20,11 @@ struct Cli {
 }
 
 fn main() {
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("fallo al instalar CryptoProvider por defecto");
+
     let cli = Cli::parse();
 
     match cli.auth {
