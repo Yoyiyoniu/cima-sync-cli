@@ -1,4 +1,5 @@
 mod auth;
+mod network;
 mod utils;
 
 use clap::Parser;
@@ -6,6 +7,7 @@ use colored::*;
 use rpassword;
 
 use auth::login;
+use network::run_network_watcher;
 use utils::print_banner;
 
 #[derive(Parser)]
@@ -15,22 +17,41 @@ use utils::print_banner;
 struct Cli {
     #[arg(long, short = 'a')]
     auth: Option<String>,
+    #[arg(long, short = 'w')]
+    watch: bool,
     #[arg(long, short = 'h')]
     help: bool,
 }
 
 fn main() {
-
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("fallo al instalar CryptoProvider por defecto");
 
     let cli = Cli::parse();
 
+    if cli.help {
+        print_commands();
+        return;
+    }
+
+    if cli.watch {
+        print_banner();
+        if let Err(error) = run_network_watcher() {
+            println!(
+                "\n{} {} {}",
+                "✗".bright_red().bold(),
+                "Error:".bright_red().bold(),
+                error.to_string().red()
+            );
+        }
+        return;
+    }
+
     match cli.auth {
         Some(user) => {
             print_banner();
-            
+
             let password =
                 rpassword::prompt_password(format!("{}", "│ Contraseña: ".bright_yellow()))
                     .unwrap();
@@ -72,18 +93,27 @@ fn main() {
             }
         }
         None => {
-            print_banner();
-            println!("{}", "Available Commands:".bright_white().bold());
-            println!(
-                "{} {}",
-                "  --auth".bright_cyan(),
-                "<username>".bright_black()
-            );
-            println!(
-                "\n{} Use {} for more information\n",
-                "Tip:".bright_yellow(),
-                "--help".bright_cyan()
-            );
+            print_commands();
         }
     }
+}
+
+fn print_commands() {
+    print_banner();
+    println!("{}", "Available Commands:".bright_white().bold());
+    println!(
+        "{} {}",
+        "  --auth".bright_cyan(),
+        "<username>".bright_black()
+    );
+    println!(
+        "{} {}",
+        "  --watch".bright_cyan(),
+        "Escucha cambios de red y estado del portal".bright_black()
+    );
+    println!(
+        "\n{} Use {} for more information\n",
+        "Tip:".bright_yellow(),
+        "--help".bright_cyan()
+    );
 }

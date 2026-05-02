@@ -6,16 +6,29 @@ use std::process::Command;
 
 use std::sync::Arc;
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme};
 use sha2::{Digest, Sha256};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptivePortalStatus {
+    Authenticated,
+    RequiresAuth { local_id: String },
+    Unavailable { reason: String },
+}
+
 pub fn login(username: &str, password: &str) -> Result<bool, Box<dyn std::error::Error>> {
     check_uabc_connection()?;
 
-    let local_id = get_local_id()?;
+    let local_id = match captive_portal_status()? {
+        CaptivePortalStatus::Authenticated => return Ok(true),
+        CaptivePortalStatus::RequiresAuth { local_id } => local_id,
+        CaptivePortalStatus::Unavailable { reason } => {
+            return Err(format!("Portal cautivo no disponible: {reason}").into());
+        }
+    };
 
     let login_success = send_login(username, password, &local_id)?;
 
@@ -26,7 +39,7 @@ pub fn login(username: &str, password: &str) -> Result<bool, Box<dyn std::error:
     Ok(false)
 }
 
-fn get_local_id() -> Result<String, Box<dyn std::error::Error>> {
+pub fn captive_portal_status() -> Result<CaptivePortalStatus, Box<dyn std::error::Error>> {
     let client = build_client(true);
 
     let response = client.get("https://pcw.uabc.mx/").send()?;
@@ -36,12 +49,24 @@ fn get_local_id() -> Result<String, Box<dyn std::error::Error>> {
             let url = location.to_str().unwrap_or_default();
             if let Some(pos) = url.find("url=") {
                 let local_id = &url[(pos + 4)..];
-                return Ok(local_id.to_string());
+                return Ok(CaptivePortalStatus::RequiresAuth {
+                    local_id: local_id.to_string(),
+                });
             }
         }
+
+        return Ok(CaptivePortalStatus::Unavailable {
+            reason: "El portal redirigió sin identificador local".to_string(),
+        });
     }
 
-    Err("Portal cautivo no disponible".into())
+    if response.status().is_success() {
+        return Ok(CaptivePortalStatus::Authenticated);
+    }
+
+    Ok(CaptivePortalStatus::Unavailable {
+        reason: format!("Respuesta HTTP {}", response.status()),
+    })
 }
 
 fn send_login(
@@ -61,7 +86,7 @@ fn send_login(
     if response.status().is_success() {
         let body = response.text()?;
         return Ok(body.contains("<title>Login Successful</title>"));
-    } 
+    }
 
     Ok(false)
 }
@@ -79,7 +104,6 @@ fn check_uabc_connection() -> Result<bool, Box<dyn std::error::Error>> {
     }
 }
 
-
 //? Pinnig certificado del portal
 #[derive(Debug)]
 struct PinnedCertVerifier {
@@ -96,8 +120,13 @@ impl ServerCertVerifier for PinnedCertVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        self.inner
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+        self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
 
         // Se calcula el SHA-256 del certificado presentado por el servidor y se compara con el pin configurado
         let mut hasher = Sha256::new();
@@ -173,10 +202,12 @@ fn build_client(no_redirect: bool) -> reqwest::blocking::Client {
         builder = builder.redirect(reqwest::redirect::Policy::none());
     }
 
-    builder.build().expect("Failed to build HTTP client with pinning")
+    builder
+        .build()
+        .expect("Failed to build HTTP client with pinning")
 }
 
-fn get_current_ssid() -> Result<String, Box<dyn std::error::Error>> {
+pub fn get_current_ssid() -> Result<String, Box<dyn std::error::Error>> {
     let output = Command::new("iwgetid").arg("-r").output()?;
 
     if !output.status.success() {
