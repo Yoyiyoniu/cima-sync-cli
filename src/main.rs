@@ -1,4 +1,5 @@
 mod auth;
+mod logging;
 mod network;
 mod utils;
 
@@ -7,6 +8,7 @@ use colored::*;
 use rpassword;
 
 use auth::login;
+use logging::LOG_TARGET;
 use network::run_network_watcher;
 use utils::print_banner;
 
@@ -28,16 +30,38 @@ fn main() {
         .install_default()
         .expect("fallo al instalar CryptoProvider por defecto");
 
+    match logging::init() {
+        Ok(path) => {
+            tracing::info!(
+                target: LOG_TARGET,
+                "[App] Startup | version={} | log_file={}",
+                env!("CARGO_PKG_VERSION"),
+                path.display(),
+            );
+            logging::log_system_inventory_and_version();
+        }
+        Err(e) => eprintln!(
+            "Advertencia: no se puede escribir el registro corporativo en archivo: {e}",
+        ),
+    }
+
     let cli = Cli::parse();
 
     if cli.help {
+        tracing::info!(target: LOG_TARGET, "[CLI] Help requested (--help)");
         print_commands();
         return;
     }
 
     if cli.watch {
+        tracing::info!(target: LOG_TARGET, "[CLI] Watch mode enabled (--watch)");
         print_banner();
         if let Err(error) = run_network_watcher() {
+            tracing::error!(
+                target: LOG_TARGET,
+                "[Watch] Network watcher error: {}",
+                error
+            );
             println!(
                 "\n{} {} {}",
                 "✗".bright_red().bold(),
@@ -50,6 +74,11 @@ fn main() {
 
     match cli.auth {
         Some(user) => {
+            tracing::info!(
+                target: LOG_TARGET,
+                "[CLI] Authentication requested (--auth) user={}",
+                user
+            );
             print_banner();
 
             let password =
@@ -61,6 +90,11 @@ fn main() {
             let lg = login(&user, &password);
             match lg {
                 Ok(_) => {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        "[Auth] Authentication completed successfully user={}",
+                        user
+                    );
                     println!(
                         "{} {}",
                         "├─ ✓".bright_green().bold(),
@@ -83,6 +117,12 @@ fn main() {
                     );
                 }
                 Err(error) => {
+                    tracing::error!(
+                        target: LOG_TARGET,
+                        "[Auth] Authentication failed user={}: {}",
+                        user,
+                        error
+                    );
                     println!(
                         "\n{} {} {}",
                         "✗".bright_red().bold(),
@@ -93,6 +133,10 @@ fn main() {
             }
         }
         None => {
+            tracing::info!(
+                target: LOG_TARGET,
+                "[CLI] No arguments provided; printing usage"
+            );
             print_commands();
         }
     }

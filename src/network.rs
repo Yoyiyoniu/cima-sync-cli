@@ -1,4 +1,5 @@
 use crate::auth::{CaptivePortalStatus, captive_portal_status, get_current_ssid};
+use crate::logging::LOG_TARGET;
 use colored::*;
 use std::fs;
 use std::io;
@@ -23,10 +24,12 @@ pub fn run_network_watcher() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_snapshot = NetworkSnapshot::read();
 
     println!("{}", "├─ Watcher de red iniciado".bright_green());
+    tracing::info!(target: LOG_TARGET, "[Watch] Network watcher started");
     println!(
         "{}",
         "├─ Esperando eventos Netlink del kernel".bright_black()
     );
+    tracing::info!(target: LOG_TARGET, "[Kernel] Netlink subscription ready; waiting for RTMGRP events");
     print_snapshot("└─ Estado inicial", &last_snapshot);
 
     loop {
@@ -44,6 +47,10 @@ pub fn run_network_watcher() -> Result<(), Box<dyn std::error::Error>> {
             last_snapshot = current_snapshot;
         } else {
             println!("{}", "└─ Sin cambio observable de red".bright_black());
+            tracing::info!(
+                target: LOG_TARGET,
+                "[Kernel] Event received; network snapshot unchanged",
+            );
         }
     }
 }
@@ -222,33 +229,53 @@ fn print_events(events: &[String]) {
         "├─ Evento de red:".bright_cyan().bold(),
         events.join(", ").bright_white()
     );
+    tracing::info!(
+        target: LOG_TARGET,
+        "[Kernel] {}",
+        events.join(", ")
+    );
 }
 
 fn print_snapshot(prefix: &str, snapshot: &NetworkSnapshot) {
     println!("{}", prefix.bright_cyan().bold());
+    let ssid = snapshot
+        .ssid
+        .as_deref()
+        .unwrap_or("sin WiFi detectado");
+    let iface = snapshot
+        .default_interface
+        .as_deref()
+        .unwrap_or("sin ruta por defecto");
     println!(
         "{} {}",
         "   ├─ SSID:".bright_black(),
-        snapshot
-            .ssid
-            .as_deref()
-            .unwrap_or("sin WiFi detectado")
-            .bright_white()
+        ssid.bright_white()
     );
     println!(
         "{} {}",
         "   ├─ Interfaz por defecto:".bright_black(),
-        snapshot
-            .default_interface
-            .as_deref()
-            .unwrap_or("sin ruta por defecto")
-            .bright_white()
+        iface.bright_white()
     );
     println!(
         "{} {}",
         "   └─ Portal cautivo:".bright_black(),
         describe_portal(&snapshot.portal)
     );
+    tracing::info!(
+        target: LOG_TARGET,
+        "[Network] Snapshot | ssid={} | default_if={} | portal={}",
+        ssid,
+        iface,
+        portal_plain(&snapshot.portal),
+    );
+}
+
+fn portal_plain(portal: &PortalReport) -> String {
+    match portal {
+        PortalReport::Authenticated => "authenticated".into(),
+        PortalReport::RequiresAuth => "requires_auth".into(),
+        PortalReport::Unavailable(reason) => format!("unavailable ({reason})"),
+    }
 }
 
 fn describe_portal(portal: &PortalReport) -> ColoredString {

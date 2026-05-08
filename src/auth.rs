@@ -1,3 +1,4 @@
+use crate::logging::LOG_TARGET;
 use reqwest;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -20,12 +21,34 @@ pub enum CaptivePortalStatus {
 }
 
 pub fn login(username: &str, password: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    tracing::info!(
+        target: LOG_TARGET,
+        "[Auth] UABC portal flow started user={}",
+        username
+    );
     check_uabc_connection()?;
 
     let local_id = match captive_portal_status()? {
-        CaptivePortalStatus::Authenticated => return Ok(true),
-        CaptivePortalStatus::RequiresAuth { local_id } => local_id,
+        CaptivePortalStatus::Authenticated => {
+            tracing::info!(
+                target: LOG_TARGET,
+                "[Portal] Already authenticated; skipping POST",
+            );
+            return Ok(true);
+        }
+        CaptivePortalStatus::RequiresAuth { local_id } => {
+            tracing::info!(
+                target: LOG_TARGET,
+                "[Portal] Authentication required; sending credential POST",
+            );
+            local_id
+        }
         CaptivePortalStatus::Unavailable { reason } => {
+            tracing::error!(
+                target: LOG_TARGET,
+                "[Portal] Unavailable ({})",
+                reason
+            );
             return Err(format!("Portal cautivo no disponible: {reason}").into());
         }
     };
@@ -33,8 +56,14 @@ pub fn login(username: &str, password: &str) -> Result<bool, Box<dyn std::error:
     let login_success = send_login(username, password, &local_id)?;
 
     if login_success {
+        tracing::info!(target: LOG_TARGET, "[Portal] Login POST returned a valid session");
         return Ok(true);
     }
+
+    tracing::warn!(
+        target: LOG_TARGET,
+        "[Portal] Login POST processed but session confirmation was missing",
+    );
 
     Ok(false)
 }
@@ -49,23 +78,42 @@ pub fn captive_portal_status() -> Result<CaptivePortalStatus, Box<dyn std::error
             let url = location.to_str().unwrap_or_default();
             if let Some(pos) = url.find("url=") {
                 let local_id = &url[(pos + 4)..];
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "[Portal] Probe detected 3xx redirect to captive portal",
+                );
                 return Ok(CaptivePortalStatus::RequiresAuth {
                     local_id: local_id.to_string(),
                 });
             }
         }
 
+        tracing::warn!(
+            target: LOG_TARGET,
+            "[Portal] Probe redirected without recognized url= token",
+        );
         return Ok(CaptivePortalStatus::Unavailable {
-            reason: "El portal redirigió sin identificador local".to_string(),
+            reason: "Portal redirect missing local identifier".to_string(),
         });
     }
 
     if response.status().is_success() {
+        tracing::info!(
+            target: LOG_TARGET,
+            "[Portal] Probe returned 200 OK (likely already authenticated)",
+        );
         return Ok(CaptivePortalStatus::Authenticated);
     }
 
+    let status = response.status();
+    tracing::warn!(
+        target: LOG_TARGET,
+        "[Portal] Probe returned HTTP status {}",
+        status
+    );
+
     Ok(CaptivePortalStatus::Unavailable {
-        reason: format!("Respuesta HTTP {}", response.status()),
+        reason: format!("HTTP response {status}"),
     })
 }
 
@@ -82,11 +130,28 @@ fn send_login(
     form.insert("password", password);
 
     let response = client.post("https://pcw.uabc.mx/").form(&form).send()?;
+    let status = response.status();
 
-    if response.status().is_success() {
+    if status.is_success() {
         let body = response.text()?;
-        return Ok(body.contains("<title>Login Successful</title>"));
+        let ok = body.contains("<title>Login Successful</title>");
+        if ok {
+            tracing::info!(target: LOG_TARGET, "[Portal] Login POST HTTP {} page confirms successful login", status);
+        } else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "[Portal] Login POST HTTP {} body missing expected 'Login Successful' title",
+                status
+            );
+        }
+        return Ok(ok);
     }
+
+    tracing::warn!(
+        target: LOG_TARGET,
+        "[Portal] Login POST returned non-success status {}",
+        status
+    );
 
     Ok(false)
 }
@@ -95,12 +160,28 @@ fn check_uabc_connection() -> Result<bool, Box<dyn std::error::Error>> {
     match get_current_ssid() {
         Ok(name) => {
             if name.contains("UABC") {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "[WiFi] SSID validation passed ssid={}",
+                    name
+                );
                 Ok(true)
             } else {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    "[WiFi] SSID validation failed ssid='{}' does not match UABC",
+                    name
+                );
                 Err("No estás conectado a la red UABC".into())
             }
         }
-        Err(_) => Err("No te encuentras en una red Wifi".into()),
+        Err(_) => {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "[WiFi] Could not read SSID from iwgetid"
+            );
+            Err("No te encuentras en una red Wifi".into())
+        }
     }
 }
 

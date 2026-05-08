@@ -1,6 +1,8 @@
+use crate::logging::LOG_TARGET;
 use colored::*;
 
 pub fn print_banner() {
+    tracing::info!(target: LOG_TARGET, "[UI] Branding banner rendered in console");
     println!("\n{}", "┌─────────────────────────────────────┐".bright_cyan());
     println!("{}", "│  █▀▀ █ █▀▄▀█ ▄▀█   █▀ █▄█ █▄░█ █▀▀  │".bright_cyan().bold());
     println!("{}", "│  █▄▄ █ █░▀░█ █▀█   ▄█ ░█░ █░▀█ █▄▄  │".bright_cyan().bold());
