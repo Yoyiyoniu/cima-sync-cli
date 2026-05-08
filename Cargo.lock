@@ -149,6 +149,8 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rustls",
+ "serde",
+ "serde_json",
  "sha2",
  "tracing",
  "tracing-appender",

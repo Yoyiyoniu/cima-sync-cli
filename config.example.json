@@ -1,0 +1,7 @@
+{
+  "user": "usuario.portal.uabc",
+  "pass": "",
+  "wifi_ssid": "UABC-2.4G",
+  "iface": "wlan0",
+  "wifi_password": ""
+}

@@ -1,4 +1,6 @@
-use crate::auth::{CaptivePortalStatus, captive_portal_status, get_current_ssid};
+use crate::auth::{
+    login, CaptivePortalStatus, captive_portal_status, get_current_ssid,
+};
 use crate::logging::LOG_TARGET;
 use colored::*;
 use std::fs;
@@ -7,6 +9,7 @@ use std::mem;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const RTMGRP_LINK: u32 = 1;
 const RTMGRP_IPV4_IFADDR: u32 = 0x10;
@@ -53,9 +56,8 @@ pub fn resolve_force_network_script() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// Ejecuta el script de reconexión forzada (bash) hacia un SSID (p. ej. UABC-2.4G).
-/// Red con clave: variable de entorno `CIMA_SYNC_WIFI_PASSWORD` antes de llamar.
-pub fn run_force_network(iface: &str, wifi_ssid: &str) -> io::Result<()> {
+/// Red con clave: `wifi_password` o variable de entorno `CIMA_SYNC_WIFI_PASSWORD` antes de llamar.
+pub fn run_force_network(iface: &str, wifi_ssid: &str, wifi_password: Option<&str>) -> io::Result<()> {
     let script = resolve_force_network_script().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -72,11 +74,12 @@ pub fn run_force_network(iface: &str, wifi_ssid: &str) -> io::Result<()> {
         script.display(),
     );
 
-    let status = Command::new("bash")
-        .arg(script.as_os_str())
-        .arg(iface)
-        .arg(wifi_ssid)
-        .status()?;
+    let mut cmd = Command::new("bash");
+    cmd.arg(script.as_os_str()).arg(iface).arg(wifi_ssid);
+    if let Some(pw) = wifi_password.filter(|s| !s.is_empty()) {
+        cmd.env("CIMA_SYNC_WIFI_PASSWORD", pw);
+    }
+    let status = cmd.status()?;
 
     if !status.success() {
         return Err(io::Error::new(
@@ -88,18 +91,26 @@ pub fn run_force_network(iface: &str, wifi_ssid: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub fn run_network_watcher() -> Result<(), Box<dyn std::error::Error>> {
+const AUTO_LOGIN_COOLDOWN: Duration = Duration::from_secs(45);
+
+pub fn run_auto_login_watcher(username: &str, password: &str) -> Result<(), Box<dyn std::error::Error>> {
     let listener = NetlinkListener::new()?;
     let mut last_snapshot = NetworkSnapshot::read();
+    let mut login_cooldown: Option<Instant> = None;
 
-    println!("{}", "├─ Watcher de red iniciado".bright_green());
-    tracing::info!(target: LOG_TARGET, "[Watch] Network watcher started");
+    println!("{}", "├─ Auto-login persistente (Netlink + portal UABC)".bright_green());
+    tracing::info!(target: LOG_TARGET, "[AutoLogin] Watcher started user={}", username);
     println!(
         "{}",
-        "├─ Esperando eventos Netlink del kernel".bright_black()
+        "├─ Escuchando el kernel; se reautentica si el portal lo pide".bright_black()
     );
-    tracing::info!(target: LOG_TARGET, "[Kernel] Netlink subscription ready; waiting for RTMGRP events");
+    tracing::info!(
+        target: LOG_TARGET,
+        "[Kernel] Netlink subscription ready; auto-login cooldown={}s",
+        AUTO_LOGIN_COOLDOWN.as_secs()
+    );
     print_snapshot("└─ Estado inicial", &last_snapshot);
+    try_auto_login_for_portal(&last_snapshot.portal, username, password, &mut login_cooldown);
 
     loop {
         let events = listener.recv_events()?;
@@ -113,12 +124,84 @@ pub fn run_network_watcher() -> Result<(), Box<dyn std::error::Error>> {
 
         if current_snapshot != last_snapshot {
             print_snapshot("└─ Estado actualizado", &current_snapshot);
-            last_snapshot = current_snapshot;
+            last_snapshot = current_snapshot.clone();
         } else {
             println!("{}", "└─ Sin cambio observable de red".bright_black());
             tracing::info!(
                 target: LOG_TARGET,
                 "[Kernel] Event received; network snapshot unchanged",
+            );
+        }
+
+        try_auto_login_for_portal(
+            &current_snapshot.portal,
+            username,
+            password,
+            &mut login_cooldown,
+        );
+    }
+}
+
+fn try_auto_login_for_portal(
+    portal: &PortalReport,
+    username: &str,
+    password: &str,
+    cooldown: &mut Option<Instant>,
+) {
+    match portal {
+        PortalReport::Authenticated => {
+            *cooldown = None;
+            tracing::info!(target: LOG_TARGET, "[AutoLogin] Portal autenticado");
+        }
+        PortalReport::RequiresAuth => {
+            let now = Instant::now();
+            if let Some(t) = *cooldown {
+                if now.duration_since(t) < AUTO_LOGIN_COOLDOWN {
+                    tracing::info!(
+                        target: LOG_TARGET,
+                        "[AutoLogin] Cooldown {}s; sin reintento aún",
+                        AUTO_LOGIN_COOLDOWN.as_secs()
+                    );
+                    return;
+                }
+            }
+            *cooldown = Some(now);
+
+            println!(
+                "{}",
+                "├─ Portal: requiere sesión → auto-login…".bright_yellow().bold()
+            );
+            tracing::info!(
+                target: LOG_TARGET,
+                "[AutoLogin] Intentando login portal user={}",
+                username
+            );
+
+            match login(username, password) {
+                Ok(_) => {
+                    println!(
+                        "{} {}",
+                        "├─ ✓".bright_green().bold(),
+                        "Auto-login completado".bright_green()
+                    );
+                    tracing::info!(target: LOG_TARGET, "[AutoLogin] Login OK");
+                }
+                Err(e) => {
+                    println!(
+                        "{} {} {}",
+                        "├─ ✗".bright_red().bold(),
+                        "Auto-login falló:".bright_red(),
+                        e.to_string().red()
+                    );
+                    tracing::warn!(target: LOG_TARGET, "[AutoLogin] Error: {}", e);
+                }
+            }
+        }
+        PortalReport::Unavailable(reason) => {
+            tracing::debug!(
+                target: LOG_TARGET,
+                "[AutoLogin] Portal no comprobable: {}",
+                reason
             );
         }
     }

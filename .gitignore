@@ -5,3 +5,4 @@ cima-sync.log
 
 dist/*
 credentials
+config.json
