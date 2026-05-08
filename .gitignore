@@ -2,3 +2,5 @@
 
 /logs/*
 cima-sync.log
+
+dist/*
