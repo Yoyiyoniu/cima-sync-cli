@@ -93,9 +93,23 @@ pub fn run_force_network(iface: &str, wifi_ssid: &str, wifi_password: Option<&st
 
 const AUTO_LOGIN_COOLDOWN: Duration = Duration::from_secs(45);
 
+const PORTAL_STALE_DEFAULT: Duration = Duration::from_secs(75);
+
+fn portal_stale_max() -> Duration {
+    std::env::var("CIMA_SYNC_PORTAL_REFRESH_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(PORTAL_STALE_DEFAULT)
+}
+
 pub fn run_auto_login_watcher(username: &str, password: &str) -> Result<(), Box<dyn std::error::Error>> {
     let listener = NetlinkListener::new()?;
-    let mut last_snapshot = NetworkSnapshot::read();
+    let stale_max = portal_stale_max();
+
+    let mut last_link = NetworkLink::read();
+    let mut last_portal = PortalReport::read();
+    let mut last_portal_probe = Instant::now();
     let mut login_cooldown: Option<Instant> = None;
 
     println!("{}", "├─ Auto-login persistente (Netlink + portal UABC)".bright_green());
@@ -106,11 +120,13 @@ pub fn run_auto_login_watcher(username: &str, password: &str) -> Result<(), Box<
     );
     tracing::info!(
         target: LOG_TARGET,
-        "[Kernel] Netlink subscription ready; auto-login cooldown={}s",
-        AUTO_LOGIN_COOLDOWN.as_secs()
+        "[Kernel] Netlink subscription ready; auto-login cooldown={}s portal_refresh={}s",
+        AUTO_LOGIN_COOLDOWN.as_secs(),
+        stale_max.as_secs()
     );
-    print_snapshot("└─ Estado inicial", &last_snapshot);
-    try_auto_login_for_portal(&last_snapshot.portal, username, password, &mut login_cooldown);
+    let initial_snapshot = NetworkSnapshot::from_parts(&last_link, &last_portal);
+    print_snapshot("└─ Estado inicial", &initial_snapshot);
+    try_auto_login_for_portal(&last_portal, None, username, password, &mut login_cooldown);
 
     loop {
         let events = listener.recv_events()?;
@@ -119,22 +135,41 @@ pub fn run_auto_login_watcher(username: &str, password: &str) -> Result<(), Box<
             continue;
         }
 
-        let current_snapshot = NetworkSnapshot::read();
         print_events(&events);
 
-        if current_snapshot != last_snapshot {
-            print_snapshot("└─ Estado actualizado", &current_snapshot);
-            last_snapshot = current_snapshot.clone();
+        let current_link = NetworkLink::read();
+        let link_changed = current_link != last_link;
+        let portal_stale =
+            Instant::now().duration_since(last_portal_probe) >= stale_max;
+        let need_portal_probe = link_changed || portal_stale;
+
+        // Solo se llama al portal (HTTP) si el enlace cambió o caducó la última sonda.
+        let current_portal = if need_portal_probe {
+            let p = PortalReport::read();
+            last_portal_probe = Instant::now();
+            p
+        } else {
+            last_portal.clone()
+        };
+
+        let snapshot_changed = link_changed || current_portal != last_portal;
+
+        if snapshot_changed {
+            let snap = NetworkSnapshot::from_parts(&current_link, &current_portal);
+            print_snapshot("└─ Estado actualizado", &snap);
+            last_link = current_link;
         } else {
             println!("{}", "└─ Sin cambio observable de red".bright_black());
-            tracing::info!(
+            tracing::debug!(
                 target: LOG_TARGET,
                 "[Kernel] Event received; network snapshot unchanged",
             );
         }
 
+        let previous_portal = mem::replace(&mut last_portal, current_portal);
         try_auto_login_for_portal(
-            &current_snapshot.portal,
+            &last_portal,
+            Some(&previous_portal),
             username,
             password,
             &mut login_cooldown,
@@ -144,14 +179,20 @@ pub fn run_auto_login_watcher(username: &str, password: &str) -> Result<(), Box<
 
 fn try_auto_login_for_portal(
     portal: &PortalReport,
+    previous: Option<&PortalReport>,
     username: &str,
     password: &str,
     cooldown: &mut Option<Instant>,
 ) {
+    let transitioned = previous.map_or(true, |prev| prev != portal);
     match portal {
         PortalReport::Authenticated => {
             *cooldown = None;
-            tracing::info!(target: LOG_TARGET, "[AutoLogin] Portal autenticado");
+            if transitioned {
+                tracing::info!(target: LOG_TARGET, "[AutoLogin] Portal autenticado");
+            } else {
+                tracing::debug!(target: LOG_TARGET, "[AutoLogin] Portal sigue autenticado");
+            }
         }
         PortalReport::RequiresAuth => {
             let now = Instant::now();
@@ -198,11 +239,19 @@ fn try_auto_login_for_portal(
             }
         }
         PortalReport::Unavailable(reason) => {
-            tracing::debug!(
-                target: LOG_TARGET,
-                "[AutoLogin] Portal no comprobable: {}",
-                reason
-            );
+            if transitioned {
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "[AutoLogin] Portal no comprobable: {}",
+                    reason
+                );
+            } else {
+                tracing::debug!(
+                    target: LOG_TARGET,
+                    "[AutoLogin] Portal sigue no comprobable: {}",
+                    reason
+                );
+            }
         }
     }
 }
@@ -281,6 +330,23 @@ impl Drop for NetlinkListener {
     }
 }
 
+/// Lectura barata del enlace local (sin red): SSID + interfaz por defecto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NetworkLink {
+    ssid: Option<String>,
+    default_interface: Option<String>,
+}
+
+impl NetworkLink {
+    fn read() -> Self {
+        Self {
+            ssid: get_current_ssid().ok().filter(|ssid| !ssid.is_empty()),
+            default_interface: get_default_interface().ok().flatten(),
+        }
+    }
+}
+
+/// Snapshot completo (enlace + portal). Solo se usa para imprimir UI/log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NetworkSnapshot {
     ssid: Option<String>,
@@ -289,11 +355,11 @@ struct NetworkSnapshot {
 }
 
 impl NetworkSnapshot {
-    fn read() -> Self {
+    fn from_parts(link: &NetworkLink, portal: &PortalReport) -> Self {
         Self {
-            ssid: get_current_ssid().ok().filter(|ssid| !ssid.is_empty()),
-            default_interface: get_default_interface().ok().flatten(),
-            portal: PortalReport::read(),
+            ssid: link.ssid.clone(),
+            default_interface: link.default_interface.clone(),
+            portal: portal.clone(),
         }
     }
 }

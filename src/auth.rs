@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use std::process::Command;
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -69,9 +69,7 @@ pub fn login(username: &str, password: &str) -> Result<bool, Box<dyn std::error:
 }
 
 pub fn captive_portal_status() -> Result<CaptivePortalStatus, Box<dyn std::error::Error>> {
-    let client = build_client(true);
-
-    let response = client.get("https://pcw.uabc.mx/").send()?;
+    let response = http_client_no_redirect().get("https://pcw.uabc.mx/").send()?;
 
     if response.status().is_redirection() {
         if let Some(location) = response.headers().get("Location") {
@@ -122,14 +120,15 @@ fn send_login(
     password: &str,
     local_id: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let client = build_client(false);
-
     let mut form = HashMap::new();
     form.insert("url", local_id);
     form.insert("username", email);
     form.insert("password", password);
 
-    let response = client.post("https://pcw.uabc.mx/").form(&form).send()?;
+    let response = http_client_follow_redirects()
+        .post("https://pcw.uabc.mx/")
+        .form(&form)
+        .send()?;
     let status = response.status();
 
     if status.is_success() {
@@ -246,6 +245,20 @@ impl ServerCertVerifier for PinnedCertVerifier {
     }
 }
 
+// Clientes HTTP cacheados: TLS + verificador con cert pinning se construyen una sola vez.
+static HTTP_CLIENT_NO_REDIRECT: LazyLock<reqwest::blocking::Client> =
+    LazyLock::new(|| build_client(true));
+static HTTP_CLIENT_FOLLOW_REDIRECTS: LazyLock<reqwest::blocking::Client> =
+    LazyLock::new(|| build_client(false));
+
+fn http_client_no_redirect() -> &'static reqwest::blocking::Client {
+    &HTTP_CLIENT_NO_REDIRECT
+}
+
+fn http_client_follow_redirects() -> &'static reqwest::blocking::Client {
+    &HTTP_CLIENT_FOLLOW_REDIRECTS
+}
+
 fn build_client(no_redirect: bool) -> reqwest::blocking::Client {
     const CERT_SHA256_HEX: &str =
         "19DC98BB1F0806934A375019394A01A9DAD4A18758EB1E4BB82607CDEB1DD25B";
@@ -256,7 +269,6 @@ fn build_client(no_redirect: bool) -> reqwest::blocking::Client {
         .try_into()
         .expect("CERT_SHA256_HEX no tiene longitud de 32 bytes");
 
-    // Construimos el RootCertStore a partir de los anchors de webpki-roots.
     let mut root_store = RootCertStore::empty();
     root_store.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
     let root_store = Arc::new(root_store);

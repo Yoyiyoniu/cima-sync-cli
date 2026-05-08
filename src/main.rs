@@ -75,9 +75,8 @@ fn main() {
         return;
     }
 
-    let net = merged_network(&cli.iface, &cli.wifi_ssid, file_cfg.as_ref());
-
     if cli.force_network {
+        let net = merged_network(&cli.iface, &cli.wifi_ssid, file_cfg.as_ref());
         tracing::info!(
             target: LOG_TARGET,
             "[CLI] Force network | iface={} | ssid={}",
