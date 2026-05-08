@@ -5,6 +5,8 @@ use std::fs;
 use std::io;
 use std::mem;
 use std::os::fd::RawFd;
+use std::path::PathBuf;
+use std::process::Command;
 
 const RTMGRP_LINK: u32 = 1;
 const RTMGRP_IPV4_IFADDR: u32 = 0x10;
@@ -18,6 +20,73 @@ const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_NEWROUTE: u16 = 24;
 const RTM_DELROUTE: u16 = 25;
+
+/// Ruta del script `scripts/force-network.sh`:
+/// `CIMA_SYNC_FORCE_NETWORK_SCRIPT`, raíz del crate en tiempo de compilación
+/// (`cargo run`), junto al binario, o directorio actual.
+pub fn resolve_force_network_script() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("CIMA_SYNC_FORCE_NETWORK_SCRIPT") {
+        let p = PathBuf::from(custom);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    let manifest_script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/force-network.sh");
+    if manifest_script.is_file() {
+        return Some(manifest_script);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for rel in ["scripts/force-network.sh", "../scripts/force-network.sh"] {
+                let candidate = dir.join(rel);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    let cwd = std::env::current_dir().ok()?;
+    let candidate = cwd.join("scripts/force-network.sh");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Ejecuta el script de reconexión forzada (bash) hacia un SSID (p. ej. UABC-2.4G).
+/// Red con clave: variable de entorno `CIMA_SYNC_WIFI_PASSWORD` antes de llamar.
+pub fn run_force_network(iface: &str, wifi_ssid: &str) -> io::Result<()> {
+    let script = resolve_force_network_script().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "No se encontró scripts/force-network.sh. Define CIMA_SYNC_FORCE_NETWORK_SCRIPT \
+             o coloca el script junto al binario en scripts/force-network.sh",
+        )
+    })?;
+
+    tracing::info!(
+        target: LOG_TARGET,
+        "[Network] Force reconnect | iface={} | ssid={} | script={}",
+        iface,
+        wifi_ssid,
+        script.display(),
+    );
+
+    let status = Command::new("bash")
+        .arg(script.as_os_str())
+        .arg(iface)
+        .arg(wifi_ssid)
+        .status()?;
+
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("force-network.sh terminó con código {status}"),
+        ));
+    }
+
+    Ok(())
+}
 
 pub fn run_network_watcher() -> Result<(), Box<dyn std::error::Error>> {
     let listener = NetlinkListener::new()?;

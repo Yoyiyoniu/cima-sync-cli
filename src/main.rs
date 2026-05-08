@@ -9,7 +9,7 @@ use rpassword;
 
 use auth::login;
 use logging::LOG_TARGET;
-use network::run_network_watcher;
+use network::{run_force_network, run_network_watcher};
 use utils::print_banner;
 
 #[derive(Parser)]
@@ -21,6 +21,13 @@ struct Cli {
     auth: Option<String>,
     #[arg(long, short = 'w')]
     watch: bool,
+    #[arg(long)]
+    force_network: bool,
+    #[arg(long, default_value = "wlan0")]
+    iface: String,
+    /// SSID al que conecta `--force-network` (red pública UABC 2.4 GHz por defecto).
+    #[arg(long, default_value = "UABC-2.4G")]
+    wifi_ssid: String,
     #[arg(long, short = 'h')]
     help: bool,
 }
@@ -50,6 +57,46 @@ fn main() {
     if cli.help {
         tracing::info!(target: LOG_TARGET, "[CLI] Help requested (--help)");
         print_commands();
+        return;
+    }
+
+    if cli.force_network {
+        tracing::info!(
+            target: LOG_TARGET,
+            "[CLI] Force network | iface={} | ssid={}",
+            cli.iface,
+            cli.wifi_ssid
+        );
+        print_banner();
+        println!(
+            "{} {} → {}",
+            "├─ Forzando WiFi en".bright_cyan().bold(),
+            cli.iface.bright_white(),
+            cli.wifi_ssid.bright_green()
+        );
+        match run_force_network(&cli.iface, &cli.wifi_ssid) {
+            Ok(()) => {
+                tracing::info!(target: LOG_TARGET, "[Network] Force reconnect completed");
+                println!(
+                    "{} {}",
+                    "└─ ✓".bright_green().bold(),
+                    "Script de red ejecutado correctamente".bright_green()
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: LOG_TARGET,
+                    "[Network] Force reconnect failed: {}",
+                    error
+                );
+                println!(
+                    "\n{} {} {}",
+                    "✗".bright_red().bold(),
+                    "Error:".bright_red().bold(),
+                    error.to_string().red()
+                );
+            }
+        }
         return;
     }
 
@@ -154,6 +201,26 @@ fn print_commands() {
         "{} {}",
         "  --watch".bright_cyan(),
         "Escucha cambios de red y estado del portal".bright_black()
+    );
+    println!(
+        "{} {}",
+        "  --force-network".bright_cyan(),
+        "WiFi rápido hacia --wifi-ssid; paciente: env CIMA_SYNC_WIFI_PATIENT=1".bright_black()
+    );
+    println!(
+        "{} {}",
+        "  --iface".bright_cyan(),
+        "Interfaz WiFi (default: wlan0)".bright_black()
+    );
+    println!(
+        "{} {}",
+        "  --wifi-ssid".bright_cyan(),
+        "SSID destino (default: UABC-2.4G); WPA: env CIMA_SYNC_WIFI_PASSWORD".bright_black()
+    );
+    println!(
+        "{} {}",
+        "  cargo run".bright_cyan(),
+        "cargo run -- --force-network   (el «--» pasa flags al binario, no a cargo)".bright_black()
     );
     println!(
         "\n{} Use {} for more information\n",
