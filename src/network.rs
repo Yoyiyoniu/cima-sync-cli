@@ -11,6 +11,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+const NETWORK_SCRIPT_EMBEDDED: &str = include_str!("../scripts/force-network.sh");
+
 const RTMGRP_LINK: u32 = 1;
 const RTMGRP_IPV4_IFADDR: u32 = 0x10;
 const RTMGRP_IPV6_IFADDR: u32 = 0x100;
@@ -24,9 +29,8 @@ const RTM_DELADDR: u16 = 21;
 const RTM_NEWROUTE: u16 = 24;
 const RTM_DELROUTE: u16 = 25;
 
-/// Ruta del script `scripts/force-network.sh`:
-/// `CIMA_SYNC_FORCE_NETWORK_SCRIPT`, raíz del crate en tiempo de compilación
-/// (`cargo run`), junto al binario, o directorio actual.
+/// Resuelve `scripts/force-network.sh`: env, árbol del proyecto, junto al binario,
+/// cwd, o **materializa** la copia embebida en caché (`~/.cache/cima-sync-cli/` en Linux).
 pub fn resolve_force_network_script() -> Option<PathBuf> {
     if let Ok(custom) = std::env::var("CIMA_SYNC_FORCE_NETWORK_SCRIPT") {
         let p = PathBuf::from(custom);
@@ -51,9 +55,44 @@ pub fn resolve_force_network_script() -> Option<PathBuf> {
         }
     }
 
-    let cwd = std::env::current_dir().ok()?;
-    let candidate = cwd.join("scripts/force-network.sh");
-    candidate.is_file().then_some(candidate)
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("scripts/force-network.sh");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    materialize_embedded_force_network_script().ok()
+}
+
+fn materialize_embedded_force_network_script() -> io::Result<PathBuf> {
+    let base = dirs::cache_dir()
+        .or_else(|| dirs::data_local_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("cima-sync-cli");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("force-network.sh");
+
+    let need_write = match fs::read_to_string(&path) {
+        Ok(existing) => existing != NETWORK_SCRIPT_EMBEDDED,
+        Err(_) => true,
+    };
+    if need_write {
+        fs::write(&path, NETWORK_SCRIPT_EMBEDDED)?;
+    }
+    #[cfg(unix)]
+    {
+        let mut perm = fs::metadata(&path)?.permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&path, perm)?;
+    }
+
+    tracing::info!(
+        target: LOG_TARGET,
+        "[Network] Script embebido materializado en {}",
+        path.display()
+    );
+    Ok(path)
 }
 
 /// Red con clave: `wifi_password` o variable de entorno `CIMA_SYNC_WIFI_PASSWORD` antes de llamar.
@@ -61,8 +100,8 @@ pub fn run_force_network(iface: &str, wifi_ssid: &str, wifi_password: Option<&st
     let script = resolve_force_network_script().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "No se encontró scripts/force-network.sh. Define CIMA_SYNC_FORCE_NETWORK_SCRIPT \
-             o coloca el script junto al binario en scripts/force-network.sh",
+            "No se encontró ni se pudo extraer force-network.sh. Define CIMA_SYNC_FORCE_NETWORK_SCRIPT, \
+             coloca scripts/ junto al binario, o revisa permisos de caché (~/.cache/cima-sync-cli/).",
         )
     })?;
 
