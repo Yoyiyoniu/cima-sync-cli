@@ -20,40 +20,59 @@ pub enum CaptivePortalStatus {
     Unavailable { reason: String },
 }
 
+const ERROR_CONEXION_RED: &str = "Error al conectarse a la red";
+
 pub fn login(username: &str, password: &str) -> Result<bool, Box<dyn std::error::Error>> {
     tracing::info!(
         target: LOG_TARGET,
         "[Auth] UABC portal flow started user={}",
         username
     );
-    check_uabc_connection()?;
 
-    let local_id = match captive_portal_status()? {
-        CaptivePortalStatus::Authenticated => {
+    let local_id = match captive_portal_status() {
+        Ok(CaptivePortalStatus::Authenticated) => {
             tracing::info!(
                 target: LOG_TARGET,
                 "[Portal] Already authenticated; skipping POST",
             );
             return Ok(true);
         }
-        CaptivePortalStatus::RequiresAuth { local_id } => {
+        Ok(CaptivePortalStatus::RequiresAuth { local_id }) => {
             tracing::info!(
                 target: LOG_TARGET,
                 "[Portal] Authentication required; sending credential POST",
             );
             local_id
         }
-        CaptivePortalStatus::Unavailable { reason } => {
+        Ok(CaptivePortalStatus::Unavailable { reason }) => {
             tracing::error!(
                 target: LOG_TARGET,
                 "[Portal] Unavailable ({})",
                 reason
             );
-            return Err(format!("Portal cautivo no disponible: {reason}").into());
+            return Err(ERROR_CONEXION_RED.into());
+        }
+        Err(error) => {
+            tracing::error!(
+                target: LOG_TARGET,
+                "[Portal] Connection failed: {}",
+                error
+            );
+            return Err(ERROR_CONEXION_RED.into());
         }
     };
 
-    let login_success = send_login(username, password, &local_id)?;
+    let login_success = match send_login(username, password, &local_id) {
+        Ok(success) => success,
+        Err(error) => {
+            tracing::error!(
+                target: LOG_TARGET,
+                "[Portal] Login POST failed: {}",
+                error
+            );
+            return Err(ERROR_CONEXION_RED.into());
+        }
+    };
 
     if login_success {
         tracing::info!(target: LOG_TARGET, "[Portal] Login POST returned a valid session");
@@ -153,35 +172,6 @@ fn send_login(
     );
 
     Ok(false)
-}
-
-fn check_uabc_connection() -> Result<bool, Box<dyn std::error::Error>> {
-    match get_current_ssid() {
-        Ok(name) => {
-            if name.contains("UABC") {
-                tracing::info!(
-                    target: LOG_TARGET,
-                    "[WiFi] SSID validation passed ssid={}",
-                    name
-                );
-                Ok(true)
-            } else {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    "[WiFi] SSID validation failed ssid='{}' does not match UABC",
-                    name
-                );
-                Err("No estás conectado a la red UABC".into())
-            }
-        }
-        Err(_) => {
-            tracing::warn!(
-                target: LOG_TARGET,
-                "[WiFi] Could not read SSID from iwgetid"
-            );
-            Err("No te encuentras en una red Wifi".into())
-        }
-    }
 }
 
 //? Pinnig certificado del portal
